@@ -1,12 +1,21 @@
+
+import { StatusCodes } from "http-status-codes";
+
 export const errorHandler = (err, req, res, next) => {
-  console.error(err);
+  console.error(err.stack || err.message);
 
   if (res.headersSent) {
     return next(err);
   }
 
-  res.status(500).json({
+  const statusCode =
+    err.statusCode || StatusCodes.INTERNAL_SERVER_ERROR;
+
+  res.status(statusCode).json({
     success: false,
-    message: "Internal server error",
+    message:
+      statusCode >= StatusCodes.INTERNAL_SERVER_ERROR
+        ? "Internal server error"
+        : err.message,
   });
 };

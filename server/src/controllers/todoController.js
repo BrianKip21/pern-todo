@@ -3,17 +3,22 @@ import pool from "../db/db.js";
 import { StatusCodes } from "http-status-codes";
 import CustomAPIError from "../utils/CustomAPIError.js";
 
-// GET /api/todos
+// GET /api/v1/todos
+// Return only the authenticated user's todos.
 export const getTodos = async (req, res, next) => {
     try {
+        const userId = req.user.userId;
+
         const result = await pool.query(
             `SELECT id, user_id, title, description, completed,
                     priority, due_date, created_at, updated_at
              FROM todos
-             ORDER BY created_at DESC`
+             WHERE user_id = $1
+             ORDER BY created_at DESC`,
+            [userId]
         );
 
-        res.status(StatusCodes.OK).json({
+        return res.status(StatusCodes.OK).json({
             success: true,
             count: result.rowCount,
             data: result.rows,
@@ -23,27 +28,29 @@ export const getTodos = async (req, res, next) => {
     }
 };
 
-// GET /api/todos/:id
+// GET /api/v1/todos/:id
+// A user can only retrieve their own todo.
 export const getTodoById = async (req, res, next) => {
     try {
         const { id } = req.params;
+        const userId = req.user.userId;
 
         const result = await pool.query(
             `SELECT id, user_id, title, description, completed,
                     priority, due_date, created_at, updated_at
              FROM todos
-             WHERE id = $1`,
-            [id]
+             WHERE id = $1 AND user_id = $2`,
+            [id, userId]
         );
 
-        if (result.rows.length === 0) {
+        if (result.rowCount === 0) {
             throw new CustomAPIError(
                 "Todo not found",
                 StatusCodes.NOT_FOUND
             );
         }
 
-        res.status(StatusCodes.OK).json({
+        return res.status(StatusCodes.OK).json({
             success: true,
             data: result.rows[0],
         });
@@ -52,11 +59,13 @@ export const getTodoById = async (req, res, next) => {
     }
 };
 
-// POST /api/todos
+// POST /api/v1/todos
+// The user ID comes from the verified JWT, not req.body.
 export const createTodo = async (req, res, next) => {
     try {
+        const userId = req.user.userId;
+
         const {
-            user_id,
             title,
             description = null,
             priority = "medium",
@@ -65,13 +74,11 @@ export const createTodo = async (req, res, next) => {
 
         // Validate required fields.
         if (
-            !Number.isSafeInteger(user_id) ||
-            user_id < 1 ||
             typeof title !== "string" ||
             !title.trim()
         ) {
             throw new CustomAPIError(
-                "A valid user_id and non-empty title are required",
+                "A non-empty title is required",
                 StatusCodes.BAD_REQUEST
             );
         }
@@ -95,8 +102,10 @@ export const createTodo = async (req, res, next) => {
         // Validate description.
         if (
             description !== null &&
-            (typeof description !== "string" ||
-                description.length > 10000)
+            (
+                typeof description !== "string" ||
+                description.length > 10000
+            )
         ) {
             throw new CustomAPIError(
                 "Description must be text of at most 10000 characters",
@@ -131,7 +140,7 @@ export const createTodo = async (req, res, next) => {
              RETURNING id, user_id, title, description, completed,
                        priority, due_date, created_at, updated_at`,
             [
-                user_id,
+                userId,
                 title.trim(),
                 description,
                 priority,
@@ -139,17 +148,17 @@ export const createTodo = async (req, res, next) => {
             ]
         );
 
-        res.status(StatusCodes.CREATED).json({
+        return res.status(StatusCodes.CREATED).json({
             success: true,
             message: "Todo created successfully",
             data: result.rows[0],
         });
     } catch (error) {
-        // PostgreSQL foreign-key violation.
+        // Handle foreign-key violations.
         if (error.code === "23503") {
             return next(
                 new CustomAPIError(
-                    "The specified user does not exist",
+                    "The authenticated user does not exist",
                     StatusCodes.BAD_REQUEST
                 )
             );
@@ -159,10 +168,13 @@ export const createTodo = async (req, res, next) => {
     }
 };
 
-// PATCH /api/todos/:id
+// PATCH /api/v1/todos/:id
+// Update only a todo belonging to the authenticated user.
 export const updateTodo = async (req, res, next) => {
     try {
         const { id } = req.params;
+        const userId = req.user.userId;
+
         const {
             title,
             description,
@@ -267,7 +279,7 @@ export const updateTodo = async (req, res, next) => {
             );
         }
 
-        // Map permitted fields to their values.
+        // Build updates using an explicit allowlist of column names.
         const fields = {
             title: title === undefined ? undefined : title.trim(),
             description,
@@ -288,27 +300,32 @@ export const updateTodo = async (req, res, next) => {
             }
         }
 
-        // Add the ID as the final query parameter.
+        // Restrict the update to this user's todo.
         values.push(id);
+        const idParameter = values.length;
+
+        values.push(userId);
+        const userIdParameter = values.length;
 
         const result = await pool.query(
             `UPDATE todos
              SET ${setClauses.join(", ")},
                  updated_at = CURRENT_TIMESTAMP
-             WHERE id = $${values.length}
+             WHERE id = $${idParameter}
+               AND user_id = $${userIdParameter}
              RETURNING id, user_id, title, description, completed,
                        priority, due_date, created_at, updated_at`,
             values
         );
 
-        if (result.rows.length === 0) {
+        if (result.rowCount === 0) {
             throw new CustomAPIError(
                 "Todo not found",
                 StatusCodes.NOT_FOUND
             );
         }
 
-        res.status(StatusCodes.OK).json({
+        return res.status(StatusCodes.OK).json({
             success: true,
             message: "Todo updated successfully",
             data: result.rows[0],
@@ -318,26 +335,28 @@ export const updateTodo = async (req, res, next) => {
     }
 };
 
-// DELETE /api/todos/:id
+// DELETE /api/v1/todos/:id
+// Delete only a todo belonging to the authenticated user.
 export const deleteTodo = async (req, res, next) => {
     try {
         const { id } = req.params;
+        const userId = req.user.userId;
 
         const result = await pool.query(
             `DELETE FROM todos
-             WHERE id = $1
+             WHERE id = $1 AND user_id = $2
              RETURNING id`,
-            [id]
+            [id, userId]
         );
 
-        if (result.rows.length === 0) {
+        if (result.rowCount === 0) {
             throw new CustomAPIError(
                 "Todo not found",
                 StatusCodes.NOT_FOUND
             );
         }
 
-        res.status(StatusCodes.OK).json({
+        return res.status(StatusCodes.OK).json({
             success: true,
             message: "Todo deleted successfully",
         });
